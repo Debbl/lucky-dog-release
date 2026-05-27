@@ -1,0 +1,137 @@
+name: Release
+
+# Triggered manually. We don't auto-build on every push to the source repo —
+# packaging across 4 OSes is slow and burns a lot of artifact storage.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Source repo ref (branch / tag / sha)'
+        required: false
+        default: 'main'
+      release_tag:
+        description: 'Optional tag to publish as a GitHub Release on this repo (e.g. v0.1.0). Leave blank to only upload artifacts.'
+        required: false
+        default: ''
+      draft:
+        description: 'Publish the GitHub Release as a draft'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            arch: arm64
+          - os: macos-15-intel
+            platform: mac
+            arch: x64
+          - os: windows-latest
+            platform: win
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v5
+
+      - name: Checkout source repo (private)
+        uses: actions/checkout@v5
+        with:
+          # SOURCE_REPO is a repository variable (Settings → Secrets and
+          # variables → Actions → Variables) set to e.g. "yourname/lucky-dog".
+          repository: ${{ vars.SOURCE_REPO }}
+          # SOURCE_REPO_TOKEN is a fine-grained PAT with Contents:Read access
+          # to the private lucky-dog repo. Set as a repository secret.
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ inputs.ref }}
+          path: source
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'lts/*'
+          cache: 'pnpm'
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (renderer + main bundle)
+        working-directory: source
+        run: pnpm run build
+
+      - name: Make (electron-builder package)
+        working-directory: source
+        env:
+          # electron-builder reads this for code-signing / publishing flows.
+          # We're not publishing through electron-builder itself, but the env
+          # variable also gates some macOS notarization behavior.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm run make
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            source/out/*.dmg
+            source/out/*.zip
+            source/out/*.exe
+            source/out/*.deb
+            source/out/*.AppImage
+            source/out/*.yml
+            source/out/*.blockmap
+          retention-days: 30
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    if: ${{ inputs.release_tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for softprops/action-gh-release to create the Release.
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Flatten artifact tree
+        run: |
+          mkdir -p release
+          # Each artifact lands in artifacts/<matrix-name>/<files>. Flatten so
+          # the release page lists files directly without nested folders.
+          find artifacts -type f \( \
+            -name '*.dmg' -o -name '*.zip' -o -name '*.exe' \
+            -o -name '*.deb' -o -name '*.AppImage' \
+            -o -name '*.yml' -o -name '*.blockmap' \
+          \) -exec cp -v {} release/ \;
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          draft: ${{ inputs.draft == 'true' }}
+          generate_release_notes: false
+          files: release/*
+          body: |
+            Built from `${{ vars.SOURCE_REPO }}@${{ inputs.ref }}`
+            on ${{ github.event.repository.updated_at }}.
