@@ -59,6 +59,9 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+        with:
+          # This repo has no package.json; read pnpm version from the checked-out source.
+          package_json_file: source/package.json
 
       - name: Setup Node
         uses: actions/setup-node@v6
