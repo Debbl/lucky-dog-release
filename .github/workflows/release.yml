@@ -115,12 +115,15 @@ jobs:
         run: |
           mkdir -p release
 
-          cp dist-artifacts/build-mac-arm64/*.dmg release/ 2>/dev/null || true
-          cp dist-artifacts/build-mac-arm64/*.zip release/ 2>/dev/null || true
-          cp dist-artifacts/build-mac-arm64/*.blockmap release/ 2>/dev/null || true
-          cp dist-artifacts/build-mac-x64/*.dmg release/ 2>/dev/null || true
-          cp dist-artifacts/build-mac-x64/*.zip release/ 2>/dev/null || true
-          cp dist-artifacts/build-mac-x64/*.blockmap release/ 2>/dev/null || true
+          # macOS arm64/x64 share the same artifactName template without ${arch},
+          # so copy per-arch to avoid the second cp overwriting the first.
+          for arch in arm64 x64; do
+            src="dist-artifacts/build-mac-${arch}"
+            if [ -d "$src" ]; then
+              cp "$src"/*.dmg release/ 2>/dev/null || true
+              cp "$src"/*.blockmap release/ 2>/dev/null || true
+            fi
+          done
 
           ARM64_YML="dist-artifacts/build-mac-arm64/latest-mac.yml"
           X64_YML="dist-artifacts/build-mac-x64/latest-mac.yml"
