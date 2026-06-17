@@ -32,7 +32,9 @@ jobs:
           - os: macos-15-intel
             platform: mac
             arch: x64
-          - os: windows-latest
+          # Pinned to windows-2025: windows-latest may resolve to an image whose
+          # VS toolchain is not yet detected by node-gyp (breaks native dep rebuild).
+          - os: windows-2025
             platform: win
             arch: x64
           - os: ubuntu-latest
@@ -42,99 +44,149 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v5
-
       - name: Checkout source repo (private)
-        uses: actions/checkout@v5
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          # SOURCE_REPO is a repository variable (Settings → Secrets and
-          # variables → Actions → Variables) set to e.g. "yourname/lucky-dog".
           repository: ${{ vars.SOURCE_REPO }}
-          # SOURCE_REPO_TOKEN is a fine-grained PAT with Contents:Read access
-          # to the private lucky-dog repo. Set as a repository secret.
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           ref: ${{ inputs.ref }}
-          path: source
+
+      - name: Setup Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
         with:
-          # This repo has no package.json; read pnpm version from the checked-out source.
-          package_json_file: source/package.json
+          package_json_file: package.json
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
-          node-version: 'lts/*'
-          cache: 'pnpm'
-          cache-dependency-path: source/pnpm-lock.yaml
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-pnpm-store-
 
       - name: Install dependencies
-        working-directory: source
         run: pnpm install --frozen-lockfile
 
       - name: Build (renderer + main bundle)
-        working-directory: source
         run: pnpm run build
 
       - name: Make (electron-builder package)
-        working-directory: source
         env:
-          # electron-builder auto-publishes in CI when it sees GH_TOKEN/GITHUB_TOKEN
-          # and a publish config pointing at the private source repo. We only want
-          # local artifacts here; the release job publishes to lucky-dog-release.
-          npm_config_publish: never
-        run: pnpm run make -- --publish never
+          NODE_OPTIONS: --max_old_space_size=8192
+          # Source repo may configure electron-builder publish → private lucky-dog.
+          # This pipeline uploads artifacts and publishes releases here instead.
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+          CI: ''
+          GITHUB_ACTIONS: ''
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkgPath = 'package.json';
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          if (pkg.build?.publish != null) {
+            delete pkg.build.publish;
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+          }
+          NODE
+          pnpm run make -- --${{ matrix.arch }}
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: ${{ matrix.platform }}-${{ matrix.arch }}
+          name: build-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            source/release/*.dmg
-            source/release/*.zip
-            source/release/*.exe
-            source/release/*.deb
-            source/release/*.AppImage
-            source/release/*.yml
-            source/release/*.blockmap
-          retention-days: 30
-          if-no-files-found: warn
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.deb
+            release/*.AppImage
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: error
 
   release:
     needs: build
     if: ${{ inputs.release_tag != '' }}
     runs-on: ubuntu-latest
     permissions:
-      # Required for softprops/action-gh-release to create the Release.
       contents: write
+
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          path: artifacts
+          path: dist-artifacts
 
-      - name: Flatten artifact tree
+      - name: Merge artifacts
         run: |
           mkdir -p release
-          # Each artifact lands in artifacts/<matrix-name>/<files>. Flatten so
-          # the release page lists files directly without nested folders.
-          find artifacts -type f \( \
-            -name '*.dmg' -o -name '*.zip' -o -name '*.exe' \
-            -o -name '*.deb' -o -name '*.AppImage' \
-            -o -name '*.yml' -o -name '*.blockmap' \
-          \) -exec cp -v {} release/ \;
+
+          cp dist-artifacts/build-mac-arm64/*.dmg release/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.zip release/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.blockmap release/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.dmg release/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.zip release/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.blockmap release/ 2>/dev/null || true
+
+          ARM64_YML="dist-artifacts/build-mac-arm64/latest-mac.yml"
+          X64_YML="dist-artifacts/build-mac-x64/latest-mac.yml"
+          MERGED_YML="release/latest-mac.yml"
+
+          if [ -f "$ARM64_YML" ] && [ -f "$X64_YML" ]; then
+            echo "Merging latest-mac.yml files..."
+            VERSION=$(grep "^version:" "$ARM64_YML" | head -1)
+            RELEASE_DATE=$(grep "^releaseDate:" "$ARM64_YML" | head -1)
+            ARM64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$ARM64_YML")
+            X64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$X64_YML")
+            PATH_LINE=$(grep "^path:" "$ARM64_YML" | head -1)
+            SHA512_LINE=$(grep "^sha512:" "$ARM64_YML" | head -1)
+            {
+              echo "$VERSION"
+              echo "files:"
+              echo "$ARM64_FILES"
+              echo "$X64_FILES"
+              echo "$PATH_LINE"
+              echo "$SHA512_LINE"
+              echo "$RELEASE_DATE"
+            } > "$MERGED_YML"
+            cat "$MERGED_YML"
+          elif [ -f "$ARM64_YML" ]; then
+            cp "$ARM64_YML" "$MERGED_YML"
+          elif [ -f "$X64_YML" ]; then
+            cp "$X64_YML" "$MERGED_YML"
+          fi
+
+          cp dist-artifacts/build-win-x64/* release/ 2>/dev/null || true
+          cp dist-artifacts/build-linux-x64/* release/ 2>/dev/null || true
+
+          rm -rf dist-artifacts
+          echo "=== All artifacts ==="
           ls -la release/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: ${{ inputs.release_tag }}
           name: ${{ inputs.release_tag }}
           draft: ${{ inputs.draft == 'true' }}
           generate_release_notes: false
-          files: release/*
+          files: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.deb
+            release/*.AppImage
+            release/*.yml
+            release/*.blockmap
           body: |
-            Built from `${{ vars.SOURCE_REPO }}@${{ inputs.ref }}`
-            on ${{ github.event.repository.updated_at }}.
+            Built from `${{ vars.SOURCE_REPO }}@${{ inputs.ref }}`.
