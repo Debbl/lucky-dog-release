@@ -81,24 +81,24 @@ jobs:
       - name: Make (electron-builder package)
         working-directory: source
         env:
-          # electron-builder reads this for code-signing / publishing flows.
-          # We're not publishing through electron-builder itself, but the env
-          # variable also gates some macOS notarization behavior.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm run make
+          # electron-builder auto-publishes in CI when it sees GH_TOKEN/GITHUB_TOKEN
+          # and a publish config pointing at the private source repo. We only want
+          # local artifacts here; the release job publishes to lucky-dog-release.
+          npm_config_publish: never
+        run: pnpm run make -- --publish never
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            source/out/*.dmg
-            source/out/*.zip
-            source/out/*.exe
-            source/out/*.deb
-            source/out/*.AppImage
-            source/out/*.yml
-            source/out/*.blockmap
+            source/release/*.dmg
+            source/release/*.zip
+            source/release/*.exe
+            source/release/*.deb
+            source/release/*.AppImage
+            source/release/*.yml
+            source/release/*.blockmap
           retention-days: 30
           if-no-files-found: warn
 
