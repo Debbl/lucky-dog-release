@@ -82,20 +82,40 @@ jobs:
       - name: Make (electron-builder package)
         env:
           NODE_OPTIONS: --max_old_space_size=8192
-          # Source repo may configure electron-builder publish → private lucky-dog.
-          # This pipeline uploads artifacts and publishes releases here instead.
-          GITHUB_TOKEN: ''
-          GH_TOKEN: ''
-          CI: ''
-          GITHUB_ACTIONS: ''
         run: |
           node <<'NODE'
           const fs = require('node:fs');
+
           const pkgPath = 'package.json';
           const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-          if (pkg.build?.publish != null) {
+          if (pkg.build) {
             delete pkg.build.publish;
+            pkg.build.publishAutoUpdate = false;
             fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+          }
+
+          for (const file of ['electron-builder.yml', 'electron-builder.yaml']) {
+            if (!fs.existsSync(file)) continue;
+            const lines = fs.readFileSync(file, 'utf8').split('\n');
+            const out = [];
+            let skip = false;
+            for (const line of lines) {
+              if (/^publish:/.test(line)) {
+                skip = true;
+                continue;
+              }
+              if (skip && /^[^\s-]/.test(line) && line.trim()) skip = false;
+              if (!skip) out.push(line);
+            }
+            fs.writeFileSync(file, out.join('\n'));
+          }
+
+          for (const file of ['scripts/electron-builder.mts', 'scripts/make.mts']) {
+            if (!fs.existsSync(file)) continue;
+            let src = fs.readFileSync(file, 'utf8');
+            if (src.includes('publish: "never"') || src.includes("publish: 'never'")) continue;
+            const next = src.replace(/(\.build|\bbuild)\s*\(\s*\{/g, '$1({ publish: "never",');
+            if (next !== src) fs.writeFileSync(file, next);
           }
           NODE
           pnpm run make -- --${{ matrix.arch }}
