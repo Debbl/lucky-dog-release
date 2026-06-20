@@ -115,8 +115,7 @@ jobs:
         run: |
           mkdir -p release
 
-          # macOS arm64/x64 share the same artifactName template without ${arch},
-          # so copy per-arch to avoid the second cp overwriting the first.
+          # Copy macOS artifacts per arch (lucky-dog-{version}-mac-{arch}.dmg).
           for arch in arm64 x64; do
             src="dist-artifacts/build-mac-${arch}"
             if [ -d "$src" ]; then

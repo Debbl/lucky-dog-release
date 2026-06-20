@@ -56,12 +56,18 @@ source code.
        └─ pnpm install --frozen-lockfile
        └─ pnpm run build           # turbo: main bundle + renderer static export
        └─ pnpm run make            # electron-builder
-       └─ upload-artifact          # out/*.dmg etc., 30-day retention
+       └─ upload-artifact          # release/*.dmg etc.
 
 if inputs.release_tag is set:
    └─ download-artifact (all 4 matrix slices)
-   └─ flatten + softprops/action-gh-release → publishes to this repo's Releases
+   └─ merge + softprops/action-gh-release → publishes to this repo's Releases
 ```
+
+Release artifacts follow the source repo's `electron-builder.mts` naming:
+
+- macOS: `lucky-dog-{version}-mac-{arm64|x64}.dmg`
+- Windows: `lucky-dog-{version}-win-x64.exe`
+- Linux: `lucky-dog-{version}-linux-x64.{deb,AppImage}`
 
 ## Why not just run Actions on `lucky-dog` directly
 
